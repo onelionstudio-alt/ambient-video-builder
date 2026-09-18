@@ -1,0 +1,30 @@
+name: Build Windows application
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install FFmpeg
+        shell: pwsh
+        run: choco install ffmpeg -y --no-progress
+      - name: Install builder
+        run: pip install -r requirements-build.txt
+      - name: Make EXE
+        shell: pwsh
+        run: |
+          $ffmpeg = (Get-Command ffmpeg).Source
+          $ffprobe = (Get-Command ffprobe).Source
+          pyinstaller --noconsole --onefile --name AmbientVideoBuilder --add-binary "$ffmpeg;." --add-binary "$ffprobe;." ambient_video_builder_gui.pyw
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AmbientVideoBuilder-Windows
+          path: dist/AmbientVideoBuilder.exe
