@@ -22,8 +22,12 @@ jobs:
       - name: Make EXE
         shell: pwsh
         run: |
-          $ffmpeg = (Get-Command ffmpeg).Source
-          $ffprobe = (Get-Command ffprobe).Source
+          # Get-Command returns Chocolatey's tiny redirector from its bin
+          # directory.  It cannot work once packed into a one-file EXE.
+          # Bundle the real static FFmpeg executables instead.
+          $ffmpeg = (Get-ChildItem "C:\ProgramData\chocolatey\lib\ffmpeg\tools" -Recurse -Filter ffmpeg.exe | Select-Object -First 1).FullName
+          $ffprobe = (Get-ChildItem "C:\ProgramData\chocolatey\lib\ffmpeg\tools" -Recurse -Filter ffprobe.exe | Select-Object -First 1).FullName
+          if (-not $ffmpeg -or -not $ffprobe) { throw "Real FFmpeg binaries were not found" }
           pyinstaller --noconsole --onefile --name AmbientVideoBuilder --add-binary "$ffmpeg;." --add-binary "$ffprobe;." ambient_video_builder_gui.pyw
       - uses: actions/upload-artifact@v4
         with:
