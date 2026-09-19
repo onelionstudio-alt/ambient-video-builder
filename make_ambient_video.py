@@ -20,11 +20,16 @@ if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
 class BuildError(RuntimeError): pass
 
 def run(cmd, *, capture=False):
-    p = subprocess.run(cmd, stdout=subprocess.PIPE if capture else None,
-                       stderr=subprocess.PIPE, text=True)
+    # FFmpeg on Windows sometimes writes useful diagnostics to stdout, and its
+    # Unicode output must never hide the actual error from the GUI.
+    p = subprocess.run(cmd, stdout=subprocess.PIPE,
+                       stderr=subprocess.PIPE, text=True, errors="replace")
     if p.returncode:
+        detail = "\n".join(x for x in (p.stderr.strip(), p.stdout.strip()) if x)
         raise BuildError(("Команда FFmpeg завершилась с ошибкой:\n" +
-                          " ".join(map(str, cmd)) + "\n\n" + p.stderr[-3500:]))
+                          " ".join(map(str, cmd)) + "\n\n" +
+                          (detail[-3500:] or "FFmpeg не вернул текст ошибки. "
+                           "В этой сборке будет использован запасной видеокодек.")))
     return p.stdout if capture else ""
 
 def ffprobe(path: Path) -> dict:
@@ -70,9 +75,21 @@ class Builder:
         else:
             geom = f"scale={self.a.width}:{self.a.height}:force_original_aspect_ratio=decrease,pad={self.a.width}:{self.a.height}:(ow-iw)/2:(oh-ih)/2:black"
         vf = f"{geom},setsar=1,fps={self.fps},format=yuv420p,setpts=PTS-STARTPTS"
-        run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(src), "-map", "0:v:0",
-             "-vf", vf, "-an", "-c:v", "libx264", "-preset", "medium", "-crf", str(self.a.crf),
-             "-movflags", "+faststart", str(dst)])
+        base = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(src), "-map", "0:v:0",
+                "-vf", vf, "-an"]
+        # libx264 is preferred.  A few Windows FFmpeg bundles omit it; retry
+        # with the native Media Foundation encoder rather than just failing.
+        try:
+            run([*base, "-c:v", "libx264", "-preset", "medium", "-crf", str(self.a.crf),
+                 "-movflags", "+faststart", str(dst)])
+        except BuildError as primary:
+            self.warn.append("libx264 недоступен или не запустился; повторная попытка через Windows H.264 encoder.")
+            try:
+                run([*base, "-c:v", "h264_mf", "-b:v", "12M", "-movflags", "+faststart", str(dst)])
+            except BuildError as fallback:
+                raise BuildError(f"Не удалось нормализовать клип:\n{src}\n\n"
+                                 f"Первая попытка (libx264):\n{primary}\n\n"
+                                 f"Запасная попытка (h264_mf):\n{fallback}") from fallback
 
     def make_video_loop(self, src: Path, dst: Path, clip_no: int):
         n = round(duration(src, "video") * self.fps)
