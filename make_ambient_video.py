@@ -22,8 +22,12 @@ class BuildError(RuntimeError): pass
 def run(cmd, *, capture=False):
     # FFmpeg on Windows sometimes writes useful diagnostics to stdout, and its
     # Unicode output must never hide the actual error from the GUI.
+    # A GUI application has no parent console.  Without this flag Windows
+    # creates an empty black window for every FFmpeg invocation.
+    creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
     p = subprocess.run(cmd, stdout=subprocess.PIPE,
-                       stderr=subprocess.PIPE, text=True, errors="replace")
+                       stderr=subprocess.PIPE, text=True, errors="replace",
+                       creationflags=creationflags)
     if p.returncode:
         detail = "\n".join(x for x in (p.stderr.strip(), p.stdout.strip()) if x)
         raise BuildError(("Команда FFmpeg завершилась с ошибкой:\n" +
@@ -114,14 +118,20 @@ class Builder:
 
     def plan(self, nclips: int, target: int) -> list[Scene]:
         rng = random.Random(self.actual_seed); lo, hi = q(self.a.min_seg, self.fps), q(self.a.max_seg, self.fps)
-        scene_x = q(self.a.scene_crossfade, self.fps); scenes=[]; used=0; last=-1; order=list(range(nclips))
+        scene_x = q(self.a.scene_crossfade, self.fps); scenes=[]; used=0; last=-1; order=list(range(nclips)); bag=[]
         while used < target:
             remaining = target - used
             # scenes overlap with prior one, except the first. Allocate visible contribution exactly.
             visible = min(rng.randint(lo, hi), remaining)
             if remaining < lo and scenes: visible = remaining
-            rng.shuffle(order)
-            idx = next((x for x in order if x != last), order[0]) if nclips > 1 else 0
+            # Use every selected clip before starting a new shuffled round.
+            # This prevents a clip from silently disappearing from the final video.
+            if not bag:
+                bag = order[:]
+                rng.shuffle(bag)
+                if nclips > 1 and bag[0] == last:
+                    bag[0], bag[1] = bag[1], bag[0]
+            idx = bag.pop(0)
             frames = visible + (scene_x if scenes else 0)
             scenes.append(Scene(len(scenes), idx, frames, used))
             used += visible; last = idx
@@ -187,18 +197,20 @@ class Builder:
             return
         with tempfile.TemporaryDirectory(dir=tmp_root, prefix="ambient_") as td:
             td=Path(td); norm=[]; loops=[]
-            print("[1/5] Нормализация клипов")
+            print(f"[1/5] Нормализация клипов: 0/{len(clips)}")
             for i,c in enumerate(clips):
+                print(f"      клип {i+1}/{len(clips)}")
                 n=td/f"norm_{i}.mp4"; self.normalize(c,n); norm.append(n)
-            print("[2/5] Создание циклов")
+            print(f"[2/5] Создание циклов: 0/{len(norm)}")
             for i,n in enumerate(norm):
+                print(f"      цикл {i+1}/{len(norm)}")
                 l=td/f"loop_{i}.mp4"; self.make_video_loop(n,l,i+1); loops.append(l)
             scenes=self.plan(len(loops),target)
             print(f"[3/5] Рендер сцен: {len(scenes)}")
             rendered=[]
             for s in scenes:
                 p=td/f"scene_{s.index:03d}.mp4"; self.render_scene(loops[s.clip],p,s.frames); rendered.append(p)
-            video=td/"video.mp4"; print("[4/5] Монтаж видео"); self.join_scenes(rendered,video)
+            video=td/"video.mp4"; print(f"[4/5] Монтаж {len(rendered)} сцен (самый долгий шаг)"); self.join_scenes(rendered,video)
             if self.a.preview:
                 out=Path(self.a.output); prev=out.with_name(out.stem+"_preview"+out.suffix)
                 # Preview contains final plan's first 20 seconds, enough to check format and transitions.
