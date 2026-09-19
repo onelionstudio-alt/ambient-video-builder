@@ -217,11 +217,14 @@ def parse_args(argv=None):
     p=argparse.ArgumentParser(description="Собрать длинное ambient-видео")
     src=p.add_mutually_exclusive_group(required=True); src.add_argument("--clips",nargs="+"); src.add_argument("--clips-dir")
     p.add_argument("--output",required=True); p.add_argument("--duration",type=float,default=30)
-    p.add_argument("--min-seg",type=float,default=120); p.add_argument("--max-seg",type=float,default=300)
+    # Shorter scenes make every selected clip appear even in a 3-minute test.
+    p.add_argument("--min-seg",type=float,default=25); p.add_argument("--max-seg",type=float,default=45)
     p.add_argument("--crossfade",type=float,default=1); p.add_argument("--scene-crossfade",type=float,default=2)
     p.add_argument("--audio",nargs="*"); p.add_argument("--audio-mode",choices=("external","silent"),default="external")
     p.add_argument("--audio-crossfade",type=float,default=2); p.add_argument("--audio-gain",nargs="*",type=float)
-    p.add_argument("--width",type=int,default=1920);p.add_argument("--height",type=int,default=1080);p.add_argument("--fps",type=int,default=30)
+    # The generated source clips are 24 fps.  Converting them to 30 fps by
+    # duplicating frames produces visible global judder, so preserve 24 fps.
+    p.add_argument("--width",type=int,default=1920);p.add_argument("--height",type=int,default=1080);p.add_argument("--fps",type=int,default=24)
     p.add_argument("--scale-mode",choices=("fit","fill"),default="fit");p.add_argument("--crf",type=int,default=18);p.add_argument("--seed",type=int)
     p.add_argument("--preview",action="store_true");p.add_argument("--dry-run",action="store_true");p.add_argument("--work-dir");p.add_argument("--overwrite",action="store_true");return p.parse_args(argv)
 
