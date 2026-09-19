@@ -94,7 +94,17 @@ class App(tk.Tk):
         out=Path(self.output.get()).expanduser()
         overwrite=out.exists()
         if overwrite and not messagebox.askyesno("Файл уже есть",f"Заменить существующий файл после успешной сборки?\n{out}"):return
-        args=["--clips",*[str(x) for x in self.clips],"--output",str(out),"--duration",str(d)]
+        # Short previews need frequent changes; a 30-minute video does not.
+        # Keeping the long version to 6–10 scenes makes its final montage fast
+        # and reliable instead of creating a huge 50+ scene FFmpeg graph.
+        if d <= 5:
+            min_seg, max_seg = 25, 45
+        elif d <= 15:
+            min_seg, max_seg = 75, 120
+        else:
+            min_seg, max_seg = 180, 300
+        args=["--clips",*[str(x) for x in self.clips],"--output",str(out),"--duration",str(d),
+              "--min-seg",str(min_seg),"--max-seg",str(max_seg)]
         if self.preview.get():args.append("--preview")
         if overwrite: args.append("--overwrite")
         if self.silent.get():args += ["--audio-mode","silent"]
