@@ -25,13 +25,15 @@ class App(tk.Tk):
         self.geometry("760x640"); self.minsize(680, 560)
         self.clips=[]; self.audio=[]; self.events=queue.Queue(); self.running=False
         self.duration=tk.StringVar(value="30")
+        self.resolution=tk.StringVar(value="4K (3840×2160)")
+        self.encoder=tk.StringVar(value="Авто — GPU, если доступен")
         self.preview=tk.BooleanVar(value=False); self.silent=tk.BooleanVar(value=False)
         self.output=tk.StringVar(value=str(Path.home()/"Videos"/"ambient_video.mp4"))
         self._ui(); self.after(100,self._read_events)
 
     def _ui(self):
         root=ttk.Frame(self,padding=16); root.pack(fill="both",expand=True)
-        root.columnconfigure(0,weight=1); root.rowconfigure(7,weight=1)
+        root.columnconfigure(0,weight=1); root.rowconfigure(8,weight=1)
         ttk.Label(root,text="Ambient Video Builder",font=("Segoe UI",18,"bold")).grid(row=0,column=0,sticky="w")
         ttk.Label(root,text="Собирает длинное спокойное видео из коротких клипов. Сначала лучше сделать превью.").grid(row=1,column=0,sticky="w",pady=(2,12))
         clips=ttk.LabelFrame(root,text="Видеоклипы",padding=8); clips.grid(row=2,column=0,sticky="nsew",pady=4); clips.columnconfigure(0,weight=1)
@@ -47,16 +49,23 @@ class App(tk.Tk):
         ttk.Entry(opts,textvariable=self.duration,width=8).pack(side="left",padx=(7,18))
         ttk.Checkbutton(opts,text="Сделать короткое превью вместо финала",variable=self.preview).pack(side="left")
         ttk.Checkbutton(opts,text="Видео без звука",variable=self.silent).pack(side="left",padx=(18,0))
-        out=ttk.Frame(root);out.grid(row=5,column=0,sticky="ew",pady=4);out.columnconfigure(1,weight=1)
+        quality=ttk.Frame(root);quality.grid(row=5,column=0,sticky="ew",pady=4)
+        ttk.Label(quality,text="Разрешение:").pack(side="left")
+        ttk.Combobox(quality,textvariable=self.resolution,state="readonly",width=20,
+                     values=("4K (3840×2160)","Full HD (1920×1080)")).pack(side="left",padx=(7,18))
+        ttk.Label(quality,text="Скорость:").pack(side="left")
+        ttk.Combobox(quality,textvariable=self.encoder,state="readonly",width=27,
+                     values=("Авто — GPU, если доступен","CPU — максимум совместимости")).pack(side="left",padx=7)
+        out=ttk.Frame(root);out.grid(row=6,column=0,sticky="ew",pady=4);out.columnconfigure(1,weight=1)
         ttk.Label(out,text="Готовый файл:").grid(row=0,column=0,sticky="w")
         ttk.Entry(out,textvariable=self.output).grid(row=0,column=1,sticky="ew",padx=8)
         ttk.Button(out,text="Куда сохранить…",command=self.choose_output).grid(row=0,column=2)
-        buttons=ttk.Frame(root);buttons.grid(row=6,column=0,sticky="ew",pady=10)
+        buttons=ttk.Frame(root);buttons.grid(row=7,column=0,sticky="ew",pady=10)
         self.go=ttk.Button(buttons,text="Собрать видео",command=self.start);self.go.pack(side="left")
         ttk.Button(buttons,text="Что нужно подготовить?",command=self.help).pack(side="left",padx=8)
         self.status=tk.StringVar(value="Выбери клипы, затем нажми «Собрать видео».")
-        ttk.Label(root,textvariable=self.status).grid(row=7,column=0,sticky="nw")
-        self.log=tk.Text(root,height=11,wrap="word",state="disabled",background="#f5f5f5");self.log.grid(row=8,column=0,sticky="nsew",pady=(5,0))
+        ttk.Label(root,textvariable=self.status).grid(row=8,column=0,sticky="nw")
+        self.log=tk.Text(root,height=11,wrap="word",state="disabled",background="#f5f5f5");self.log.grid(row=9,column=0,sticky="nsew",pady=(5,0))
 
     def refresh(self, box, items):
         box.delete(0,"end")
@@ -105,6 +114,11 @@ class App(tk.Tk):
             min_seg, max_seg = 180, 300
         args=["--clips",*[str(x) for x in self.clips],"--output",str(out),"--duration",str(d),
               "--min-seg",str(min_seg),"--max-seg",str(max_seg)]
+        if self.resolution.get().startswith("4K"):
+            args += ["--width","3840","--height","2160"]
+        else:
+            args += ["--width","1920","--height","1080"]
+        args += ["--encoder", "auto" if self.encoder.get().startswith("Авто") else "cpu"]
         if self.preview.get():args.append("--preview")
         if overwrite: args.append("--overwrite")
         if self.silent.get():args += ["--audio-mode","silent"]

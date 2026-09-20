@@ -70,8 +70,41 @@ class Scene:
 class Builder:
     def __init__(self, a):
         self.a = a; self.fps = a.fps; self.warn: list[str] = []; self.actual_seed = a.seed
-        self.report: dict = {"version": "1.0", "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        self.report: dict = {"version": "2.0", "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
                              "warnings": self.warn, "settings": vars(a).copy()}
+        self.encoder, self.encoder_args = self.select_encoder()
+        self.report["encoder"] = self.encoder
+
+    def encoder_available(self, name: str, args: list[str]) -> bool:
+        """An encoder can be listed by FFmpeg even when matching hardware is absent."""
+        cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+               "-i", "color=black:s=128x72:r=24:d=0.1", "-frames:v", "1",
+               "-c:v", name, *args, "-f", "null", "-"]
+        creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+        return subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                              creationflags=creationflags).returncode == 0
+
+    def select_encoder(self) -> tuple[str, list[str]]:
+        cpu = ("libx264", ["-preset", self.a.cpu_preset, "-crf", str(self.a.crf)])
+        candidates = {
+            "nvenc": ("h264_nvenc", ["-preset", "p4", "-tune", "hq", "-rc", "vbr", "-cq", str(self.a.gpu_quality), "-b:v", "0"]),
+            "qsv": ("h264_qsv", ["-preset", "medium", "-global_quality", str(self.a.gpu_quality)]),
+            "amf": ("h264_amf", ["-quality", "balanced", "-rc", "cqp", "-qp_i", str(self.a.gpu_quality), "-qp_p", str(self.a.gpu_quality + 2)]),
+        }
+        if self.a.encoder == "cpu": return cpu
+        wanted = list(candidates) if self.a.encoder == "auto" else [self.a.encoder]
+        for key in wanted:
+            name, args = candidates[key]
+            if self.encoder_available(name, args):
+                return name, args
+        if self.a.encoder != "auto":
+            self.warn.append(f"Кодировщик {self.a.encoder} недоступен; используется CPU (libx264).")
+        else:
+            self.warn.append("Совместимый GPU-кодировщик не найден; используется CPU (libx264).")
+        return cpu
+
+    def encode_args(self) -> list[str]:
+        return ["-c:v", self.encoder, *self.encoder_args, "-pix_fmt", "yuv420p"]
 
     def normalize(self, src: Path, dst: Path):
         if self.a.scale_mode == "fill":
@@ -138,12 +171,33 @@ class Builder:
         self.report["target_frames"] = target; self.report["scenes"] = [asdict(x) for x in scenes]
         return scenes
 
-    def render_scene(self, loop: Path, dst: Path, frames: int):
-        run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-stream_loop", "-1", "-i", str(loop),
-             "-filter:v", f"trim=end_frame={frames},setpts=PTS-STARTPTS", "-an", "-r", str(self.fps),
-             "-c:v", "libx264", "-preset", "medium", "-crf", str(self.a.crf), str(dst)])
+    def render_timeline(self, loops: list[Path], scenes: list[Scene], dst: Path):
+        """Loop, trim and join the full timeline in one encode."""
+        inputs=[]; graph=[]
+        for i, scene in enumerate(scenes):
+            inputs += ["-stream_loop", "-1", "-i", str(loops[scene.clip])]
+            graph.append(f"[{i}:v]trim=end_frame={scene.frames},setpts=PTS-STARTPTS[s{i}]")
+        if len(scenes) == 1:
+            last = "s0"
+        else:
+            last = "s0"
+            x = q(self.a.scene_crossfade, self.fps)
+            cumulative = scenes[0].frames
+            if x == 0:
+                labels = "".join(f"[s{i}]" for i in range(len(scenes)))
+                graph.append(f"{labels}concat=n={len(scenes)}:v=1:a=0[vout]")
+                last = "vout"
+            else:
+                for i in range(1, len(scenes)):
+                    offset=(cumulative-x)/self.fps
+                    out=f"v{i}"; graph.append(f"[{last}][s{i}]xfade=transition=fade:duration={x/self.fps:.9f}:offset={offset:.9f}[{out}]")
+                    cumulative += scenes[i].frames-x; last=out
+        run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", *inputs,
+             "-filter_complex", ";".join(graph), "-map", f"[{last}]", "-an", "-r", str(self.fps),
+             *self.encode_args(), "-movflags", "+faststart", str(dst)])
 
     def join_scenes(self, scenes: list[Path], dst: Path):
+        """Legacy helper retained for compatibility with older callers."""
         if len(scenes) == 1: shutil.copy2(scenes[0], dst); return
         x = q(self.a.scene_crossfade, self.fps)
         if x == 0:
@@ -190,33 +244,32 @@ class Builder:
         self.report["final"]={"path":str(out),"video_frames":frames,"duration_seconds":float(vs.get("duration",0))}
 
     def build(self, clips: list[Path], audios: list[Path]):
-        target=q(self.a.duration*60,self.fps); tmp_root=Path(self.a.work_dir) if self.a.work_dir else None
+        requested_target=q(self.a.duration*60,self.fps)
+        target=min(requested_target, q(20,self.fps)) if self.a.preview else requested_target
+        tmp_root=Path(self.a.work_dir) if self.a.work_dir else None
         if self.a.dry_run:
             self.plan(len(clips), target)
             print(json.dumps(self.report,ensure_ascii=False,indent=2))
             return
         with tempfile.TemporaryDirectory(dir=tmp_root, prefix="ambient_") as td:
             td=Path(td); norm=[]; loops=[]
-            print(f"[1/5] Нормализация клипов: 0/{len(clips)}")
+            print(f"[1/4] Нормализация клипов: 0/{len(clips)}")
             for i,c in enumerate(clips):
                 print(f"      клип {i+1}/{len(clips)}")
                 n=td/f"norm_{i}.mp4"; self.normalize(c,n); norm.append(n)
-            print(f"[2/5] Создание циклов: 0/{len(norm)}")
+            print(f"[2/4] Создание циклов: 0/{len(norm)}")
             for i,n in enumerate(norm):
                 print(f"      цикл {i+1}/{len(norm)}")
                 l=td/f"loop_{i}.mp4"; self.make_video_loop(n,l,i+1); loops.append(l)
             scenes=self.plan(len(loops),target)
-            print(f"[3/5] Рендер сцен: {len(scenes)}")
-            rendered=[]
-            for s in scenes:
-                p=td/f"scene_{s.index:03d}.mp4"; self.render_scene(loops[s.clip],p,s.frames); rendered.append(p)
-            video=td/"video.mp4"; print(f"[4/5] Монтаж {len(rendered)} сцен (самый долгий шаг)"); self.join_scenes(rendered,video)
+            video=td/"video.mp4"
+            print(f"[3/4] Финальный монтаж в один проход: {len(scenes)} сцен; кодировщик {self.encoder}")
+            self.render_timeline(loops,scenes,video)
             if self.a.preview:
                 out=Path(self.a.output); prev=out.with_name(out.stem+"_preview"+out.suffix)
-                # Preview contains final plan's first 20 seconds, enough to check format and transitions.
-                run(["ffmpeg","-hide_banner","-loglevel","error","-y","-i",str(video),"-t","20","-c:v","libx264","-crf",str(self.a.crf),str(prev)])
+                shutil.copy2(video, prev)
                 print("Превью:",prev); return
-            print("[5/5] Сборка звука и экспорт")
+            print("[4/4] Сборка звука и экспорт")
             al=[]
             for i,a in enumerate(audios):
                 p=td/f"audio_loop_{i}.wav"; self.make_audio_loop(a,p,i+1); al.append(p)
@@ -238,6 +291,9 @@ def parse_args(argv=None):
     # duplicating frames produces visible global judder, so preserve 24 fps.
     p.add_argument("--width",type=int,default=1920);p.add_argument("--height",type=int,default=1080);p.add_argument("--fps",type=int,default=24)
     p.add_argument("--scale-mode",choices=("fit","fill"),default="fit");p.add_argument("--crf",type=int,default=18);p.add_argument("--seed",type=int)
+    p.add_argument("--encoder",choices=("auto","cpu","nvenc","qsv","amf"),default="auto")
+    p.add_argument("--cpu-preset",choices=("ultrafast","superfast","veryfast","faster","fast","medium","slow"),default="fast")
+    p.add_argument("--gpu-quality",type=int,default=20)
     p.add_argument("--preview",action="store_true");p.add_argument("--dry-run",action="store_true");p.add_argument("--work-dir");p.add_argument("--overwrite",action="store_true");return p.parse_args(argv)
 
 def main(argv=None):
