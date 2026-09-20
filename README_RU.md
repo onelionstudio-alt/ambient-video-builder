@@ -4,6 +4,8 @@
 
 Открой двойным щелчком `start_builder.bat`. Появится окно: добавь видео, при желании звук, укажи длительность, разрешение и место сохранения, затем нажми «Собрать видео». Команды вводить не надо. По умолчанию выбраны **4K** и автоматический быстрый кодировщик: NVIDIA, Intel или AMD при наличии, иначе CPU.
 
+По умолчанию включён режим **«Монтаж — обычные клипы»**. Он предназначен для Flow и Kling: каждый клип проигрывается только вперёд, без разворота и короткого loop. Программа делает два перемешанных круга, соединяет кадры спокойными переходами и повторяет уже весь большой блок до выбранной длительности.
+
 Для такого запуска нужны две бесплатные установки один раз: [Python](https://www.python.org/downloads/windows/) (в установщике включи **Add Python to PATH**) и [FFmpeg](https://www.gyan.dev/ffmpeg/builds/). После скачивания FFmpeg добавь его папку `bin` в системный PATH. Это временный вариант до готового EXE.
 
 В репозитории есть GitHub Action, которая собирает готовый единый `AmbientVideoBuilder.exe` вместе с FFmpeg. Его можно будет скачать из раздела **Actions → Build Windows application → Artifacts**, распаковать и запускать двойным щелчком — без Python и FFmpeg.
@@ -26,6 +28,12 @@ python make_ambient_video.py --clips-dir ./clips --audio waves.wav fire.wav --ou
 
 ```bash
 python make_ambient_video.py --clips-dir ./clips --audio waves.wav fire.wav --output ambient_4k.mp4 --duration 30 --width 3840 --height 2160 --encoder auto
+```
+
+Монтаж обычных AI-клипов без индивидуального зацикливания:
+
+```bash
+python make_ambient_video.py --clips-dir ./clips --audio waves.wav --output ambient_30min.mp4 --duration 30 --mode montage --transition calm --transition-duration 0.8 --montage-rounds 2
 ```
 
 Сначала сделай превью (оно не создаёт 30-минутный файл):
@@ -55,6 +63,9 @@ python make_ambient_video.py --clips-dir ./clips --audio-mode silent --output si
 - `--encoder auto` — проверить NVIDIA NVENC, Intel Quick Sync и AMD AMF, затем автоматически перейти на CPU, если аппаратное кодирование недоступно.
 - `--encoder cpu` — принудительно использовать `libx264`; `--cpu-preset fast` задаёт баланс скорости и качества.
 - `--width 3840 --height 2160` — экспорт 4K; в окне 4K уже выбрано по умолчанию.
+- `--mode montage` — проигрывать клипы вперёд и повторять большой монтажный блок; `loop` оставляет прежний режим.
+- `--transition calm` — в основном мягкое растворение и редкая белая дымка; доступны также `fade`, `fadewhite` и `fadeblack`.
+- `--transition-duration 0.8` — длительность монтажного перехода в секундах.
 
 Рядом с итогом появляется `*_report.json` с seed и планом сцен. Повтор с тем же seed даёт тот же порядок.
 
