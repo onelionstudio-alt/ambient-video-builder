@@ -262,7 +262,10 @@ class Builder:
         target_s=target_frames/self.fps
         audio_args=["-map","0:a?","-c:a","copy"] if self.a.keep_scene_audio else ["-an"]
         run(["ffmpeg","-hide_banner","-loglevel","error","-y","-stream_loop","-1","-i",str(reel),
-             "-t",f"{target_s:.9f}","-frames:v",str(target_frames),"-map","0:v","-c:v","copy",*audio_args,
+             # -t is rounded against copied packet timestamps and can cut a
+             # few frames from a long repeated reel.  The frame cap alone is
+             # exact and also stops the accompanying repeated audio.
+             "-frames:v",str(target_frames),"-map","0:v","-c:v","copy",*audio_args,
              "-movflags","+faststart",str(dst)])
 
     def render_timeline(self, loops: list[Path], scenes: list[Scene], dst: Path):
