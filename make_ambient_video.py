@@ -106,23 +106,38 @@ class Builder:
     def encode_args(self) -> list[str]:
         return ["-c:v", self.encoder, *self.encoder_args, "-pix_fmt", "yuv420p"]
 
-    def normalize(self, src: Path, dst: Path):
+    def normalize(self, src: Path, dst: Path, keep_audio=False):
+        """Put every clip on one video (and, when requested, audio) format.
+
+        Montage transitions need an audio stream on every input.  A silent
+        stereo track for a clip without sound is much safer than making the
+        whole render fail just because one Flow clip happened to be mute.
+        """
         if self.a.scale_mode == "fill":
             geom = f"scale={self.a.width}:{self.a.height}:force_original_aspect_ratio=increase,crop={self.a.width}:{self.a.height}"
         else:
             geom = f"scale={self.a.width}:{self.a.height}:force_original_aspect_ratio=decrease,pad={self.a.width}:{self.a.height}:(ow-iw)/2:(oh-ih)/2:black"
         vf = f"{geom},setsar=1,fps={self.fps},format=yuv420p,setpts=PTS-STARTPTS"
-        base = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(src), "-map", "0:v:0",
-                "-vf", vf, "-an"]
+        base = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(src)]
+        output = ["-map", "0:v:0", "-vf", vf]
+        if keep_audio:
+            has_audio = any(s.get("codec_type") == "audio" for s in ffprobe(src).get("streams", []))
+            if has_audio:
+                output += ["-map", "0:a:0", "-c:a", "aac", "-ar", "48000", "-ac", "2", "-shortest"]
+            else:
+                base += ["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000"]
+                output += ["-map", "1:a:0", "-c:a", "aac", "-ar", "48000", "-ac", "2", "-shortest"]
+        else:
+            output += ["-an"]
         # libx264 is preferred.  A few Windows FFmpeg bundles omit it; retry
         # with the native Media Foundation encoder rather than just failing.
         try:
-            run([*base, "-c:v", "libx264", "-preset", "medium", "-crf", str(self.a.crf),
+            run([*base, *output, "-c:v", "libx264", "-preset", "medium", "-crf", str(self.a.crf),
                  "-movflags", "+faststart", str(dst)])
         except BuildError as primary:
             self.warn.append("libx264 недоступен или не запустился; повторная попытка через Windows H.264 encoder.")
             try:
-                run([*base, "-c:v", "h264_mf", "-b:v", "12M", "-movflags", "+faststart", str(dst)])
+                run([*base, *output, "-c:v", "h264_mf", "-b:v", "12M", "-movflags", "+faststart", str(dst)])
             except BuildError as fallback:
                 raise BuildError(f"Не удалось нормализовать клип:\n{src}\n\n"
                                  f"Первая попытка (libx264):\n{primary}\n\n"
@@ -212,6 +227,8 @@ class Builder:
         for i,s in enumerate(scenes):
             inputs += ["-i",str(clips[s.clip])]
             graph.append(f"[{i}:v]trim=end_frame={s.frames},setpts=PTS-STARTPTS[s{i}]")
+            if self.a.keep_scene_audio:
+                graph.append(f"[{i}:a]aformat=sample_rates=48000:channel_layouts=stereo,atrim=end={s.frames/self.fps:.9f},asetpts=PTS-STARTPTS[a{i}]")
         last="s0"; cumulative=scenes[0].frames
         for i in range(1,len(scenes)):
             offset=(cumulative-x)/self.fps; out=f"m{i}"
@@ -224,14 +241,28 @@ class Builder:
             end=max(0,cumulative/self.fps-edge)
             graph.append(f"[{last}]fade=t=in:st=0:d={edge:.3f}:color=white,fade=t=out:st={end:.9f}:d={edge:.3f}:color=white[reel]")
             mapped="reel"
+        audio_args=[]
+        if self.a.keep_scene_audio:
+            alast="a0"
+            for i in range(1,len(scenes)):
+                out=f"ma{i}"
+                graph.append(f"[{alast}][a{i}]acrossfade=d={x/self.fps:.9f}:c1=tri:c2=tri[{out}]")
+                alast=out
+            if edge_fade:
+                graph.append(f"[{alast}]afade=t=in:st=0:d={edge:.3f},afade=t=out:st={end:.9f}:d={edge:.3f}[areel]")
+                alast="areel"
+            audio_args=["-map",f"[{alast}]","-c:a","aac","-b:a","192k","-ar","48000"]
+        else:
+            audio_args=["-an"]
         run(["ffmpeg","-hide_banner","-loglevel","error","-y",*inputs,
-             "-filter_complex",";".join(graph),"-map",f"[{mapped}]","-an","-r",str(self.fps),
-             *self.encode_args(),"-movflags","+faststart",str(dst)])
+             "-filter_complex",";".join(graph),"-map",f"[{mapped}]","-r",str(self.fps),
+             *self.encode_args(),*audio_args,"-movflags","+faststart",str(dst)])
 
     def repeat_montage(self, reel: Path, dst: Path, target_frames: int):
         target_s=target_frames/self.fps
+        audio_args=["-map","0:a?","-c:a","copy"] if self.a.keep_scene_audio else ["-an"]
         run(["ffmpeg","-hide_banner","-loglevel","error","-y","-stream_loop","-1","-i",str(reel),
-             "-t",f"{target_s:.9f}","-frames:v",str(target_frames),"-map","0:v","-an","-c:v","copy",
+             "-t",f"{target_s:.9f}","-frames:v",str(target_frames),"-map","0:v","-c:v","copy",*audio_args,
              "-movflags","+faststart",str(dst)])
 
     def render_timeline(self, loops: list[Path], scenes: list[Scene], dst: Path):
@@ -289,13 +320,21 @@ class Builder:
 
     def final_with_audio(self, video: Path, audio: list[Path], target_s: float, out: Path):
         if not audio:
-            if self.a.audio_mode != "silent": raise BuildError("Не указан звук. Добавь --audio или укажи --audio-mode silent.")
-            run(["ffmpeg","-hide_banner","-loglevel","error","-y","-i",str(video),"-map","0:v","-c:v","copy","-movflags","+faststart",str(out)]); return
+            if self.a.audio_mode == "silent":
+                run(["ffmpeg","-hide_banner","-loglevel","error","-y","-i",str(video),"-map","0:v","-c:v","copy","-movflags","+faststart",str(out)]); return
+            if self.a.keep_scene_audio:
+                run(["ffmpeg","-hide_banner","-loglevel","error","-y","-i",str(video),"-map","0:v","-map","0:a?","-c","copy","-movflags","+faststart",str(out)]); return
+            raise BuildError("Не указан звук. Добавь --audio, включи сохранение звука сцен или укажи --audio-mode silent.")
         inputs=["-i",str(video)]; graph=[]
+        labels=[]
+        if self.a.keep_scene_audio:
+            graph.append(f"[0:a]atrim=end={target_s:.9f},asetpts=PTS-STARTPTS,volume={self.a.scene_audio_gain}dB[scene]")
+            labels.append("[scene]")
         for i,p in enumerate(audio,1):
             inputs += ["-stream_loop","-1","-i",str(p)]
             graph.append(f"[{i}:a]atrim=end={target_s:.9f},asetpts=PTS-STARTPTS,volume={self.a.audio_gain[i-1]}dB[a{i}]")
-        mix="".join(f"[a{i}]" for i in range(1,len(audio)+1))+f"amix=inputs={len(audio)}:normalize=0:duration=longest,alimiter=limit=0.891251,afade=t=in:st=0:d={min(2,target_s/2):.3f},afade=t=out:st={max(0,target_s-min(2,target_s/2)):.3f}:d={min(2,target_s/2):.3f}[aout]"
+            labels.append(f"[a{i}]")
+        mix="".join(labels)+f"amix=inputs={len(labels)}:normalize=0:duration=longest,alimiter=limit=0.891251,afade=t=in:st=0:d={min(2,target_s/2):.3f},afade=t=out:st={max(0,target_s-min(2,target_s/2)):.3f}:d={min(2,target_s/2):.3f}[aout]"
         graph.append(mix)
         run(["ffmpeg","-hide_banner","-loglevel","error","-y",*inputs,"-filter_complex",";".join(graph),
              "-map","0:v","-map","[aout]","-c:v","copy","-c:a","aac","-b:a","192k","-ar","48000",
@@ -322,7 +361,7 @@ class Builder:
             print(f"[1/4] Нормализация клипов: 0/{len(clips)}")
             for i,c in enumerate(clips):
                 print(f"      клип {i+1}/{len(clips)}")
-                n=td/f"norm_{i}.mp4"; self.normalize(c,n); norm.append(n)
+                n=td/f"norm_{i}.mp4"; self.normalize(c,n,keep_audio=(self.a.mode == "montage" and self.a.keep_scene_audio)); norm.append(n)
             if self.a.mode == "montage":
                 scenes=self.plan_montage(norm,target if self.a.preview else None)
                 reel=td/"montage_reel.mp4"
@@ -364,6 +403,8 @@ def parse_args(argv=None):
     p.add_argument("--crossfade",type=float,default=1); p.add_argument("--scene-crossfade",type=float,default=2)
     p.add_argument("--audio",nargs="*"); p.add_argument("--audio-mode",choices=("external","silent"),default="external")
     p.add_argument("--audio-crossfade",type=float,default=2); p.add_argument("--audio-gain",nargs="*",type=float)
+    p.add_argument("--keep-scene-audio",action="store_true",help="Сохранить локальный звук, уже встроенный в видеосцены.")
+    p.add_argument("--scene-audio-gain",type=float,default=0,help="Громкость локального звука сцен в dB.")
     # The generated source clips are 24 fps.  Converting them to 30 fps by
     # duplicating frames produces visible global judder, so preserve 24 fps.
     p.add_argument("--width",type=int,default=1920);p.add_argument("--height",type=int,default=1080);p.add_argument("--fps",type=int,default=24)
