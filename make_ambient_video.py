@@ -342,7 +342,11 @@ class Builder:
 
     def validate_final(self, out: Path, target_frames: int):
         data=ffprobe(out); vs=next(s for s in data["streams"] if s["codec_type"]=="video")
-        frames=int(vs.get("nb_frames") or 0); got=round(float(vs.get("duration",0))*self.fps)
+        # With stream-copy repeating, MP4's duration timestamp can be rounded
+        # two frames beyond the real stream.  The actual frame count is the
+        # authoritative value whenever FFprobe provides it.
+        frames=int(vs.get("nb_frames") or 0)
+        got=frames or round(float(vs.get("duration",0))*self.fps)
         if abs(got-target_frames)>1: raise BuildError(f"Финальная длительность неверна: {got} кадров вместо {target_frames}")
         run(["ffmpeg","-hide_banner","-loglevel","error","-v","error","-i",str(out),"-f","null","-"])
         self.report["final"]={"path":str(out),"video_frames":frames,"duration_seconds":float(vs.get("duration",0))}
