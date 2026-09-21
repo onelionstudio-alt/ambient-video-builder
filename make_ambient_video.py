@@ -318,7 +318,7 @@ class Builder:
            f"[tail][head]acrossfade=d={c:.9f}:c1=tri:c2=tri[blend];[main][blend]concat=n=2:v=0:a=1[out]")
         run(["ffmpeg","-hide_banner","-loglevel","error","-y","-i",str(src),"-filter_complex",g,"-map","[out]","-c:a","pcm_s16le",str(dst)])
 
-    def final_with_audio(self, video: Path, audio: list[Path], target_s: float, out: Path):
+    def final_with_audio(self, video: Path, audio: list[Path], target_s: float, target_frames: int, out: Path):
         if not audio:
             if self.a.audio_mode == "silent":
                 run(["ffmpeg","-hide_banner","-loglevel","error","-y","-i",str(video),"-map","0:v","-c:v","copy","-movflags","+faststart",str(out)]); return
@@ -338,14 +338,21 @@ class Builder:
         graph.append(mix)
         run(["ffmpeg","-hide_banner","-loglevel","error","-y",*inputs,"-filter_complex",";".join(graph),
              "-map","0:v","-map","[aout]","-c:v","copy","-c:a","aac","-b:a","192k","-ar","48000",
-             "-t",f"{target_s:.9f}","-movflags","+faststart",str(out)])
+             # A time limit can drop a few last video frames when the audio
+             # encoder rounds packet timestamps.  The requested frame count
+             # is the contract of this application, so enforce it directly.
+             "-frames:v",str(target_frames),"-movflags","+faststart",str(out)])
 
     def validate_final(self, out: Path, target_frames: int):
         data=ffprobe(out); vs=next(s for s in data["streams"] if s["codec_type"]=="video")
         # With stream-copy repeating, MP4's duration timestamp can be rounded
-        # two frames beyond the real stream.  The actual frame count is the
-        # authoritative value whenever FFprobe provides it.
+        # by a few frames.  Ask FFprobe to count the actual video frames if
+        # the container did not store nb_frames.
         frames=int(vs.get("nb_frames") or 0)
+        if not frames:
+            counted=json.loads(run(["ffprobe","-v","error","-count_frames","-select_streams","v:0",
+                                    "-show_entries","stream=nb_read_frames","-of","json",str(out)],capture=True))
+            frames=int(counted.get("streams",[{}])[0].get("nb_read_frames") or 0)
         got=frames or round(float(vs.get("duration",0))*self.fps)
         if abs(got-target_frames)>1: raise BuildError(f"Финальная длительность неверна: {got} кадров вместо {target_frames}")
         run(["ffmpeg","-hide_banner","-loglevel","error","-v","error","-i",str(out),"-f","null","-"])
@@ -394,7 +401,7 @@ class Builder:
             for i,a in enumerate(audios):
                 p=td/f"audio_loop_{i}.wav"; self.make_audio_loop(a,p,i+1); al.append(p)
             out=Path(self.a.output); temp=out.with_name(out.stem+".partial"+out.suffix)
-            self.final_with_audio(video,al,target/self.fps,temp); self.validate_final(temp,target); os.replace(temp,out)
+            self.final_with_audio(video,al,target/self.fps,target,temp); self.validate_final(temp,target); os.replace(temp,out)
             report_path=out.with_name(out.stem+"_report.json"); report_path.write_text(json.dumps(self.report,ensure_ascii=False,indent=2),encoding="utf-8")
             print("Готово:",out); print("Отчёт:",report_path)
 
